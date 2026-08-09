@@ -192,16 +192,24 @@ export function ChatWindow() {
                   }
                   hasValidResponse = true;
 
-                  setMessages((prev) => [
-                    ...prev,
-                    {
-                      id: generateId(),
-                      role: 'assistant',
-                      content: interruptContent,
-                      timestamp: Date.now(),
-                      isInterrupt: true,
-                    },
-                  ]);
+                  // Use functional update to check last message and avoid duplicate
+                  setMessages((prev) => {
+                    const lastMsg = prev[prev.length - 1];
+                    if (lastMsg && lastMsg.content === interruptContent) {
+                      // Same content, skip adding duplicate
+                      return prev;
+                    }
+                    return [
+                      ...prev,
+                      {
+                        id: generateId(),
+                        role: 'assistant' as const,
+                        content: interruptContent,
+                        timestamp: Date.now(),
+                        isInterrupt: true,
+                      },
+                    ];
+                  });
                 }
               } else if (event === 'Error') {
                 const errorMsg =
