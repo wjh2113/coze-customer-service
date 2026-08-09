@@ -2,7 +2,7 @@ import { NextRequest } from 'next/server';
 
 const COZE_API_BASE = process.env.COZE_API_BASE_URL || 'https://api.coze.cn';
 const WORKFLOW_ID = process.env.COZE_WORKFLOW_ID || '';
-const API_TOKEN = process.env.COZE_WORKLOAD_API_TOKEN || '';
+const API_TOKEN = process.env.COZE_WORKFLOW_PAT || process.env.COZE_WORKLOAD_API_TOKEN || '';
 
 interface ChatRequestBody {
   message: string;
@@ -149,7 +149,8 @@ export async function POST(request: NextRequest) {
       requestBody = {
         workflow_id: WORKFLOW_ID,
         parameters: {
-          input: message,
+          USER_INPUT: message,
+          CONVERSATION_NAME: 'default',
         },
       };
     }

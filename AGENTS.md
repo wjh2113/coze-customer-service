@@ -74,7 +74,7 @@
 ### 环境变量 (.env.local)
 | 变量名 | 说明 |
 |--------|------|
-| `COZE_WORKLOAD_API_TOKEN` | PAT 认证令牌 |
+| `COZE_WORKFLOW_PAT` | PAT 认证令牌（注意：不能用 `COZE_WORKLOAD_API_TOKEN`，会被系统 SAT 覆盖） |
 | `COZE_WORKFLOW_ID` | 已发布工作流 ID |
 | `COZE_API_BASE_URL` | API 地址，默认 `https://api.coze.cn` |
 
