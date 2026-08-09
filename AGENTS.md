@@ -63,3 +63,41 @@
 
 - 模板默认预装核心组件库 `shadcn/ui`，位于`src/components/ui/`目录下
 - Next.js 项目**必须默认**采用 shadcn/ui 组件、风格和规范，**除非用户指定用其他的组件和规范。**
+
+## 智能客服项目指南
+
+### 核心架构
+- **后端**：`src/app/api/chat/route.ts` — 透传前端请求到 Coze 工作流 SSE 接口
+- **前端**：`src/components/chat/` — 聊天窗口、消息气泡、输入框组件
+- **工作流**：通过 `stream_run` 启动，`stream_resume` 恢复中断
+
+### 环境变量 (.env.local)
+| 变量名 | 说明 |
+|--------|------|
+| `COZE_WORKLOAD_API_TOKEN` | PAT 认证令牌 |
+| `COZE_WORKFLOW_ID` | 已发布工作流 ID |
+| `COZE_API_BASE_URL` | API 地址，默认 `https://api.coze.cn` |
+
+### 关键文件
+| 文件 | 职责 |
+|------|------|
+| `src/app/api/chat/route.ts` | 后端 API，路由到 stream_run / stream_resume |
+| `src/components/chat/chat-window.tsx` | 主聊天窗口，管理消息列表和 SSE 流 |
+| `src/components/chat/message-bubble.tsx` | 消息气泡组件 |
+| `src/components/chat/chat-input.tsx` | 输入框 + 发送/停止按钮 |
+| `src/components/chat/chat-header.tsx` | 顶部导航栏 |
+| `src/components/chat/types.ts` | 类型定义 |
+
+### SSE 事件协议
+后端将 Coze 工作流 SSE 转译为统一协议：
+- `{ type: 'coze_event', event: 'Message', data: {...} }` — 节点输出
+- `{ type: 'coze_event', event: 'Interrupt', data: {...} }` — 工作流追问
+- `{ type: 'coze_event', event: 'Done', data: {...} }` — 执行完成
+- `{ type: 'coze_event', event: 'Error', data: {...} }` — 执行错误
+- `{ type: 'error', message: '...' }` — 后端错误
+- `{ type: 'done' }` — 流结束
+
+### 主题
+- Cyan 主题，bento 阴影，lg 圆角
+- 所有颜色通过 CSS 变量引用，见 `globals.css`
+- 设计规范见 `DESIGN.md`
