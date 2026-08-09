@@ -43,8 +43,7 @@ export function ChatWindow() {
       const decoder = new TextDecoder();
       let buffer = '';
       let assistantMessageAdded = false;
-      let currentAssistantContent = '';
-      let hasOrderResult = false;
+      let hasValidResponse = false;
       const messageGroups: Map<string, ChatMessage> = new Map();
 
       while (true) {
@@ -66,19 +65,18 @@ export function ChatWindow() {
             const payload = JSON.parse(jsonStr) as SSEEvent;
 
             if (payload.type === 'done') {
-              // If no order result was found and user sent order-like input
-              if (!hasOrderResult && !assistantMessageAdded) {
-                break;
-              }
-              // Finalize any open assistant message
-              if (assistantMessageAdded && currentAssistantContent) {
-                setMessages((prev) =>
-                  prev.map((m) =>
-                    m.id === 'current-assistant'
-                      ? { ...m, content: currentAssistantContent }
-                      : m
-                  )
-                );
+              // If no valid response was received, show fallback
+              if (!hasValidResponse && !assistantMessageAdded) {
+                setMessages((prev) => [
+                  ...prev,
+                  {
+                    id: generateId(),
+                    role: 'assistant',
+                    content: '抱歉，服务暂时不可用，请稍后再试。',
+                    timestamp: Date.now(),
+                    isError: true,
+                  },
+                ]);
               }
               break;
             }
@@ -89,11 +87,12 @@ export function ChatWindow() {
                 {
                   id: generateId(),
                   role: 'assistant',
-                  content: `抱歉，出现了一些问题：${payload.message}`,
+                  content: `抱歉，出现了一些问题：${payload.message || '未知错误'}`,
                   timestamp: Date.now(),
                   isError: true,
                 },
               ]);
+              hasValidResponse = true;
               break;
             }
 
@@ -102,13 +101,33 @@ export function ChatWindow() {
               const event = payload.event as string;
 
               if (event === 'Message') {
+                // Check if this is an error message from the workflow
+                const errorCode = eventData.error_code as number | undefined;
+                const errorMessage = eventData.error_message as string | undefined;
+
+                if (errorCode && errorMessage) {
+                  // Workflow returned an error
+                  setMessages((prev) => [
+                    ...prev,
+                    {
+                      id: generateId(),
+                      role: 'assistant',
+                      content: `抱歉，服务出错（${errorCode}）：${errorMessage}`,
+                      timestamp: Date.now(),
+                      isError: true,
+                    },
+                  ]);
+                  hasValidResponse = true;
+                  continue;
+                }
+
                 const nodeTitle = (eventData.node_title as string) || '输出';
                 const content = (eventData.content as string) || '';
                 const loopIndex = eventData.loop_index as number | undefined;
                 const groupKey = `${nodeTitle}-${loopIndex ?? 0}`;
 
                 if (content) {
-                  hasOrderResult = true;
+                  hasValidResponse = true;
 
                   if (messageGroups.has(groupKey)) {
                     // Append to existing group
@@ -118,7 +137,6 @@ export function ChatWindow() {
                       ...existing,
                       content: updatedContent,
                     });
-                    currentAssistantContent = updatedContent;
                     setMessages((prev) =>
                       prev.map((m) =>
                         m.id === existing.id
@@ -137,43 +155,54 @@ export function ChatWindow() {
                       loopIndex,
                     };
                     messageGroups.set(groupKey, newMsg);
-                    currentAssistantContent = content;
 
                     if (!assistantMessageAdded) {
                       assistantMessageAdded = true;
-                      setMessages((prev) => [...prev, newMsg]);
-                    } else {
-                      setMessages((prev) => [...prev, newMsg]);
                     }
+                    setMessages((prev) => [...prev, newMsg]);
                   }
                 }
               } else if (event === 'Interrupt') {
-                const eventId = eventData.event_id as string;
-                const interruptType = eventData.interrupt_type as number;
+                // Parse interrupt data structure
+                const interruptData = eventData.interrupt_data as Record<string, unknown> | undefined;
 
-                setPendingResume({
-                  eventId,
-                  interruptType,
-                });
+                if (interruptData) {
+                  const eventId = interruptData.event_id as string;
+                  const interruptType = interruptData.type as number;
 
-                // Show interrupt question
-                const interruptContent =
-                  (eventData.interrupt_data as string) ||
-                  '请提供更多信息';
+                  setPendingResume({
+                    eventId,
+                    interruptType,
+                  });
 
-                if (!assistantMessageAdded) {
-                  assistantMessageAdded = true;
+                  // Extract content from interrupt data
+                  let interruptContent = '请提供更多信息';
+                  const rawData = interruptData.data as string | undefined;
+                  if (rawData) {
+                    try {
+                      const parsed = JSON.parse(rawData) as Record<string, unknown>;
+                      interruptContent = (parsed.content as string) || interruptContent;
+                    } catch {
+                      interruptContent = rawData;
+                    }
+                  }
+
+                  if (!assistantMessageAdded) {
+                    assistantMessageAdded = true;
+                  }
+                  hasValidResponse = true;
+
+                  setMessages((prev) => [
+                    ...prev,
+                    {
+                      id: generateId(),
+                      role: 'assistant',
+                      content: interruptContent,
+                      timestamp: Date.now(),
+                      isInterrupt: true,
+                    },
+                  ]);
                 }
-                setMessages((prev) => [
-                  ...prev,
-                  {
-                    id: generateId(),
-                    role: 'assistant',
-                    content: interruptContent,
-                    timestamp: Date.now(),
-                    isInterrupt: true,
-                  },
-                ]);
               } else if (event === 'Error') {
                 const errorMsg =
                   (eventData.error_message as string) || '工作流执行出错';
@@ -187,6 +216,7 @@ export function ChatWindow() {
                     isError: true,
                   },
                 ]);
+                hasValidResponse = true;
               }
             }
           } catch {
@@ -246,31 +276,6 @@ export function ChatWindow() {
 
         const reader = response.body.getReader();
         await processSSEStream(reader);
-
-        // Check if we got any assistant response; if not, show fallback
-        setMessages((prev) => {
-          const lastAssistant = [...prev].reverse().find(
-            (m) => m.role === 'assistant' && !m.isWelcome
-          );
-          // If user sent order-like input and no order result came back
-          const orderPattern = /1[3-9]\d{9}|SF\d+|YT\d+|JD\d+|ZT\d+|\d{10,}/;
-          if (
-            orderPattern.test(text) &&
-            (!lastAssistant || lastAssistant.isInterrupt || lastAssistant.isError)
-          ) {
-            return [
-              ...prev,
-              {
-                id: generateId(),
-                role: 'assistant' as const,
-                content: '未查询到相关订单信息，请检查手机号或快递单号是否正确。',
-                timestamp: Date.now(),
-                isFallback: true,
-              },
-            ];
-          }
-          return prev;
-        });
       } catch (err) {
         if (err instanceof Error && err.name === 'AbortError') {
           return;
