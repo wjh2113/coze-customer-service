@@ -57,6 +57,7 @@ async function proxyWorkflowStream(
   const reader = upstream.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  let currentEvent = 'Message'; // Default SSE event type
 
   const stream = new ReadableStream({
     async pull(controller) {
@@ -75,6 +76,18 @@ async function proxyWorkflowStream(
 
         for (const line of lines) {
           const trimmed = line.trim();
+          
+          // Capture SSE event type
+          if (trimmed.startsWith('event:')) {
+            currentEvent = trimmed.slice(6).trim();
+            continue;
+          }
+          
+          // Skip id: lines
+          if (trimmed.startsWith('id:')) {
+            continue;
+          }
+          
           if (!trimmed || !trimmed.startsWith('data:')) continue;
 
           const jsonStr = trimmed.slice(5).trim();
@@ -82,11 +95,10 @@ async function proxyWorkflowStream(
 
           try {
             const parsed = JSON.parse(jsonStr) as Record<string, unknown>;
-            const event = parsed.event as string;
 
             const forwardPayload = {
               type: 'coze_event',
-              event,
+              event: currentEvent,
               data: parsed,
             };
             controller.enqueue(
