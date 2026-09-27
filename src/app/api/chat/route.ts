@@ -26,66 +26,98 @@ function buildHeaders(): Record<string, string> {
 }
 
 /**
- * Parse SSE stream from Coze workflow and forward a friendly protocol to frontend.
+ * Forward Coze SSE as it arrives. The first comment is sent immediately so the
+ * gateway sees response headers before a slow workflow finishes.
  * Protocol:
- *   { type: 'meta', workflowId: string }
  *   { type: 'coze_event', event: string, data: unknown }
  *   { type: 'error', message: string }
  *   { type: 'done' }
  */
-function translateCozeSse(raw: string): string {
-  const lines = raw.split('\n');
-  let currentEvent = 'Message';
-  let out = '';
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-
-    if (trimmed.startsWith('event:')) {
-      currentEvent = trimmed.slice(6).trim();
-      continue;
-    }
-
-    if (trimmed.startsWith('id:') || !trimmed || !trimmed.startsWith('data:')) {
-      continue;
-    }
-
-    const jsonStr = trimmed.slice(5).trim();
-    if (!jsonStr) continue;
-
-    try {
-      const parsed = JSON.parse(jsonStr) as Record<string, unknown>;
-      out += `data: ${JSON.stringify({
-        type: 'coze_event',
-        event: currentEvent,
-        data: parsed,
-      })}\n\n`;
-    } catch {
-      // Skip malformed JSON lines
-    }
-  }
-
-  out += `data: ${JSON.stringify({ type: 'done' })}\n\n`;
-  return out;
-}
-
-async function proxyWorkflowStream(
+function proxyWorkflowStream(
   url: string,
   body: Record<string, unknown>,
   headers: Record<string, string>
-): Promise<string> {
-  const response = await fetch(url, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body),
+): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  const encode = (payload: Record<string, unknown>) =>
+    encoder.encode(`data: ${JSON.stringify(payload)}\n\n`);
+
+  return new ReadableStream({
+    async start(controller) {
+      const send = (payload: Record<string, unknown>) => {
+        controller.enqueue(encode(payload));
+      };
+      controller.enqueue(encoder.encode(`: open\n\n`));
+
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body),
+        });
+
+        if (!response.ok || !response.body) {
+          const errorText = response.ok
+            ? 'No response body from Coze API'
+            : await response.text();
+          send({
+            type: 'error',
+            message: response.ok
+              ? errorText
+              : `Coze API error ${response.status}: ${errorText}`,
+          });
+          send({ type: 'done' });
+          controller.close();
+          return;
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let currentEvent = 'Message';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (trimmed.startsWith('event:')) {
+              currentEvent = trimmed.slice(6).trim();
+              continue;
+            }
+            if (!trimmed.startsWith('data:')) continue;
+
+            const jsonStr = trimmed.slice(5).trim();
+            if (!jsonStr) continue;
+
+            try {
+              const parsed = JSON.parse(jsonStr) as Record<string, unknown>;
+              send({ type: 'coze_event', event: currentEvent, data: parsed });
+            } catch {
+              // Skip malformed JSON lines
+            }
+          }
+        }
+
+        send({ type: 'done' });
+        controller.close();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Stream error';
+        try {
+          send({ type: 'error', message });
+          send({ type: 'done' });
+          controller.close();
+        } catch {
+          // Stream already closed
+        }
+      }
+    },
   });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Coze API error ${response.status}: ${errorText}`);
-  }
-
-  return translateCozeSse(await response.text());
 }
 
 export async function POST(request: NextRequest) {
@@ -132,13 +164,14 @@ export async function POST(request: NextRequest) {
       };
     }
 
-    const payload = await proxyWorkflowStream(url, requestBody, headers);
+    const stream = proxyWorkflowStream(url, requestBody, headers);
 
-    return new Response(payload, {
+    return new Response(stream, {
       headers: {
         'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
+        'Cache-Control': 'no-cache, no-transform',
         Connection: 'keep-alive',
+        'X-Accel-Buffering': 'no',
       },
     });
   } catch (err) {
