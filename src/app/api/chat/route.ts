@@ -33,11 +33,47 @@ function buildHeaders(): Record<string, string> {
  *   { type: 'error', message: string }
  *   { type: 'done' }
  */
+function translateCozeSse(raw: string): string {
+  const lines = raw.split('\n');
+  let currentEvent = 'Message';
+  let out = '';
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+
+    if (trimmed.startsWith('event:')) {
+      currentEvent = trimmed.slice(6).trim();
+      continue;
+    }
+
+    if (trimmed.startsWith('id:') || !trimmed || !trimmed.startsWith('data:')) {
+      continue;
+    }
+
+    const jsonStr = trimmed.slice(5).trim();
+    if (!jsonStr) continue;
+
+    try {
+      const parsed = JSON.parse(jsonStr) as Record<string, unknown>;
+      out += `data: ${JSON.stringify({
+        type: 'coze_event',
+        event: currentEvent,
+        data: parsed,
+      })}\n\n`;
+    } catch {
+      // Skip malformed JSON lines
+    }
+  }
+
+  out += `data: ${JSON.stringify({ type: 'done' })}\n\n`;
+  return out;
+}
+
 async function proxyWorkflowStream(
   url: string,
   body: Record<string, unknown>,
   headers: Record<string, string>
-): Promise<ReadableStream> {
+): Promise<string> {
   const response = await fetch(url, {
     method: 'POST',
     headers,
@@ -49,78 +85,7 @@ async function proxyWorkflowStream(
     throw new Error(`Coze API error ${response.status}: ${errorText}`);
   }
 
-  const upstream = response.body;
-  if (!upstream) {
-    throw new Error('No response body from Coze API');
-  }
-
-  const reader = upstream.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let currentEvent = 'Message'; // Default SSE event type
-
-  const stream = new ReadableStream({
-    async pull(controller) {
-      const encoder = new TextEncoder();
-      try {
-        const { done, value } = await reader.read();
-        if (done) {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'done' })}\n\n`));
-          controller.close();
-          return;
-        }
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          const trimmed = line.trim();
-          
-          // Capture SSE event type
-          if (trimmed.startsWith('event:')) {
-            currentEvent = trimmed.slice(6).trim();
-            continue;
-          }
-          
-          // Skip id: lines
-          if (trimmed.startsWith('id:')) {
-            continue;
-          }
-          
-          if (!trimmed || !trimmed.startsWith('data:')) continue;
-
-          const jsonStr = trimmed.slice(5).trim();
-          if (!jsonStr) continue;
-
-          try {
-            const parsed = JSON.parse(jsonStr) as Record<string, unknown>;
-
-            const forwardPayload = {
-              type: 'coze_event',
-              event: currentEvent,
-              data: parsed,
-            };
-            controller.enqueue(
-              encoder.encode(`data: ${JSON.stringify(forwardPayload)}\n\n`)
-            );
-          } catch {
-            // Skip malformed JSON lines
-          }
-        }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : 'Stream error';
-        controller.enqueue(
-          encoder.encode(
-            `data: ${JSON.stringify({ type: 'error', message })}\n\n`
-          )
-        );
-        controller.close();
-      }
-    },
-  });
-
-  return stream;
+  return translateCozeSse(await response.text());
 }
 
 export async function POST(request: NextRequest) {
@@ -167,9 +132,9 @@ export async function POST(request: NextRequest) {
       };
     }
 
-    const stream = await proxyWorkflowStream(url, requestBody, headers);
+    const payload = await proxyWorkflowStream(url, requestBody, headers);
 
-    return new Response(stream, {
+    return new Response(payload, {
       headers: {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
